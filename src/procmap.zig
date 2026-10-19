@@ -74,14 +74,15 @@ pub const ProcmapQuery = extern struct {
         NoSuchProcess,
         /// ENOENT
         NotFound,
-    } || std.fs.File.OpenError;
+    } || std.posix.OpenError;
 
     pub fn query(q: *ProcmapQuery) QueryError!void {
-        const fd = try std.fs.openFileAbsolute("/proc/self/maps", .{});
-        defer fd.close();
+        const fd = try std.posix.openat(std.posix.AT.FDCWD, "/proc/self/maps", .{ .CLOEXEC = true }, 0);
+        defer std.Io.Threaded.closeFd(fd);
 
-        const err = std.os.linux.ioctl(fd.handle, procmap_query, @intFromPtr(q));
-        if (err < 0) return switch (std.posix.errno(err)) {
+        const result = std.os.linux.ioctl(fd, procmap_query, @intFromPtr(q));
+        return switch (std.posix.errno(result)) {
+            .SUCCESS => {},
             .BADF => return QueryError.BadFileDescriptor,
             .NOTTY => return QueryError.BadProcmapHandle,
             .FAULT => return QueryError.BadAddress,
@@ -89,7 +90,7 @@ pub const ProcmapQuery = extern struct {
             .@"2BIG" => return QueryError.BufferExceeded,
             .SRCH => return QueryError.NoSuchProcess,
             .NOENT => return QueryError.NotFound,
-            else => unreachable,
+            else => |err| std.posix.unexpectedErrno(err),
         };
     }
 };
@@ -106,11 +107,11 @@ test {
         .query_flags = .{ .covering_or_next_vma = true },
     };
 
-    for(0..20) |_| {
+    for (0..20) |_| {
         std.debug.print("{x}\n", .{q.query_addr});
         try q.query();
-        std.debug.print("{x}-{x}\n", .{q.vma_start, q.vma_end});
-        if(q.query_addr == q.vma_end) break;
+        std.debug.print("{x}-{x}\n", .{ q.vma_start, q.vma_end });
+        if (q.query_addr == q.vma_end) break;
         q.query_addr = q.vma_end + 1;
     }
 }

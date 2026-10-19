@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     addExample(b, "logging", "Log calls to a function using hooks", zigzag, target);
 }
 
-fn addExample(b: *std.Build, comptime name: []const u8, comptime description: []const u8, zigzag: *std.Build.Module, target: std.Build.ResolvedTarget)void {
+fn addExample(b: *std.Build, comptime name: []const u8, comptime description: []const u8, zigzag: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     const example = b.addExecutable(.{
         .name = name ++ "_example",
         .root_module = b.createModule(.{

@@ -1,4 +1,3 @@
-const std = @import("std");
 const trampoline_buffer_size = @import("hooks.zig").trampoline_buffer_size;
 const Allocator = @This();
 
@@ -6,7 +5,7 @@ const mem = @import("mem.zig");
 
 pub const Chunk = [trampoline_buffer_size]u8;
 pub const ReserveChunkError = error{OutOfChunks};
-pub const AllocBlockError = mem.MapError || error{UnavailableNearbyPage} || mem.QueryError || std.posix.MProtectError;
+pub const AllocBlockError = mem.MapError || error{UnavailableNearbyPage} || mem.QueryError;
 pub const Error = ReserveChunkError || AllocBlockError;
 /// type erased implementation
 ptr: *anyopaque,

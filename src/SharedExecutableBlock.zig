@@ -1,7 +1,6 @@
 const std = @import("std");
 const mem = @import("mem.zig");
 const builtin = @import("builtin");
-const kernel32 = @import("kernel32.zig");
 const memory_block_size = @import("PageChunkAllocator.zig").memory_block_size;
 const SharedExecutableBlock = @This();
 
@@ -9,46 +8,9 @@ const ChunkAllocator = @import("ChunkAllocator.zig");
 const Chunk = ChunkAllocator.Chunk;
 const ReserveChunkError = ChunkAllocator.ReserveChunkError;
 const AllocBlockError = ChunkAllocator.AllocBlockError;
-const Error = ChunkAllocator.Error;
 
 const Hook = @import("hooks.zig");
 const trampoline_buffer_size = Hook.trampoline_buffer_size;
-const getPages = Hook.getPages;
-
-var mmap_min_address: ?usize = null;
-var allocation_granularity: ?usize = switch (builtin.os.tag) {
-    .windows => null,
-    else => std.mem.page_size,
-};
-
-pub const CacheMinAddressError = switch (builtin.os.tag) {
-    .windows => error{},
-    else => std.fs.File.OpenError || std.fs.File.ReadError || std.fmt.ParseIntError,
-};
-
-// TODO: Use std.once
-pub fn cacheMinAddressAndGranularity() CacheMinAddressError!void {
-    switch (builtin.os.tag) {
-        .windows => {
-            var system_info: std.os.windows.SYSTEM_INFO = undefined;
-            kernel32.GetSystemInfo(&system_info);
-            mmap_min_address = @intFromPtr(system_info.lpMinimumApplicationAddress);
-            allocation_granularity = system_info.dwAllocationGranularity;
-        },
-        else => {
-            if (mmap_min_address != null) {
-                return;
-            }
-
-            var buf: [16]u8 = .{0} ** 16;
-            const fd = try std.fs.openFileAbsolute("/proc/sys/vm/mmap_min_addr", .{});
-            defer fd.close();
-
-            const size = try fd.read(&buf);
-            mmap_min_address = try std.fmt.parseInt(usize, buf[0 .. size - 1], 10);
-        },
-    }
-}
 
 const chunk_amount = n: {
     const n = (memory_block_size - @sizeOf(?*SharedExecutableBlock)) / (@sizeOf(Chunk) + (1 / 8));
@@ -80,16 +42,13 @@ chunks: [chunk_amount]Chunk,
 pub fn init(address: usize) AllocBlockError!*SharedExecutableBlock {
     const blob: *SharedExecutableBlock = @ptrCast(@alignCast(try mem.map(@ptrFromInt(address), memory_block_size, .{ .read = true, .write = true, .execute = true })));
 
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         @memset(@as(*[memory_block_size]u8, @ptrCast(blob)), 0xCC);
     }
 
     blob.head.next = null;
     // blob.head.reserved_chunks = ChunkState.initAllTo(0);
-    blob.head.reserved_chunks = ChunkState.initEmpty();
-
-    const pages = getPages(@intFromPtr(blob));
-    try std.posix.mprotect(pages, std.posix.PROT.READ | std.posix.PROT.WRITE | std.posix.PROT.EXEC);
+    blob.head.reserved_chunks = .empty;
 
     return blob;
 }

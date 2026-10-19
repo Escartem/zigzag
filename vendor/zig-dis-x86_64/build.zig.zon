@@ -1,0 +1,13 @@
+.{
+    .name = .zig_dis_x86_64,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+        "src",
+    },
+    .fingerprint = 0x64af27c9514e786e,
+}

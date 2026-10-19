@@ -3,7 +3,6 @@ const windows = std.os.windows;
 const PROT = std.posix.PROT;
 const target = @import("builtin").os.tag;
 const kernel32 = @import("kernel32.zig");
-const SharedBlock = @import("SharedExecutableBlock.zig");
 const procmap = switch (target) {
     .windows => void,
     else => @import("procmap.zig"),
@@ -16,94 +15,84 @@ pub const Protection = packed struct {
 
     pub const everything: Protection = .{ .read = true, .write = true, .execute = true };
 
-    fn flags(prot: Protection) u32 {
-        return switch (target) {
-            .windows => prot.winapiFlags(),
-            .linux => prot.posixFlags(),
-            else => unreachable,
-        };
+    fn posixFlags(p: Protection) PROT {
+        return .{ .READ = p.read, .WRITE = p.write, .EXEC = p.execute };
     }
 
-    fn posixFlags(p: Protection) u32 {
-        var f: u32 = 0;
-        f |= if (p.read) PROT.READ else PROT.NONE;
-        f |= if (p.write) PROT.WRITE else PROT.NONE;
-        f |= if (p.execute) PROT.EXEC else PROT.NONE;
-
-        return f;
+    fn winapiFlags(p: Protection) windows.PAGE {
+        return windows.PAGE.fromProtection(.{ .read = p.read, .write = p.write, .execute = p.execute }) orelse unreachable;
     }
 
-    fn winapiFlags(p: Protection) u32 {
-        // TODO: this could just be a switch on a packed struct once it's in the langauge
-        if (p == Protection{}) return windows.PAGE_NOACCESS;
-        if (p == Protection{ .read = true }) return windows.PAGE_READONLY;
-        if (p == Protection{ .read = true, .write = true }) return windows.PAGE_READWRITE;
-        if (p == Protection{ .execute = true }) return windows.PAGE_EXECUTE;
-        if (p == Protection{ .read = true, .execute = true }) return windows.PAGE_EXECUTE_READ;
-        if (p == Protection{ .read = true, .write = true, .execute = true }) return windows.PAGE_EXECUTE_READWRITE;
-
-        // +w -r is not allowed
-        unreachable;
-    }
-
-    fn fromWinapi(f: u32) Protection {
-        return switch (f) {
-            windows.PAGE_READONLY => .{ .read = true },
-            windows.PAGE_READWRITE, windows.PAGE_WRITECOPY => .{ .read = true, .write = true },
-            windows.PAGE_EXECUTE => .{ .execute = true },
-            windows.PAGE_EXECUTE_READ => .{ .execute = true },
-            windows.PAGE_EXECUTE_READWRITE, windows.PAGE_EXECUTE_WRITECOPY => .{ .execute = true, .read = true, .write = true },
-            else => .{},
-        };
-    }
-
-    fn fromPosix(f: u32) Protection {
+    fn fromWinapi(f: windows.PAGE) Protection {
         return .{
-            .read = f & PROT.READ != 0,
-            .write = f & PROT.WRITE != 0,
-            .execute = f & PROT.EXEC != 0,
+            .read = f.READONLY or f.READWRITE or f.WRITECOPY or f.EXECUTE_READ or f.EXECUTE_READWRITE or f.EXECUTE_WRITECOPY,
+            .write = f.READWRITE or f.WRITECOPY or f.EXECUTE_READWRITE or f.EXECUTE_WRITECOPY,
+            .execute = f.EXECUTE or f.EXECUTE_READ or f.EXECUTE_READWRITE or f.EXECUTE_WRITECOPY,
+        };
+    }
+
+    fn fromPosix(f: PROT) Protection {
+        return .{
+            .read = f.READ,
+            .write = f.WRITE,
+            .execute = f.EXEC,
         };
     }
 
     test {
         const a: Protection = .everything;
-        try std.testing.expect(a.flagsLinux() == PROT.WRITE | PROT.READ | PROT.EXEC);
+        try std.testing.expectEqual(PROT{ .WRITE = true, .READ = true, .EXEC = true }, a.posixFlags());
 
         const b: Protection = .{ .read = true };
-        try std.testing.expect(b.flagsLinux() == PROT.READ);
+        try std.testing.expectEqual(PROT{ .READ = true }, b.posixFlags());
 
         const c: Protection = .{ .write = true };
-        try std.testing.expect(c.flagsLinux() == PROT.WRITE);
+        try std.testing.expectEqual(PROT{ .WRITE = true }, c.posixFlags());
 
         const d: Protection = .{ .execute = true };
-        try std.testing.expect(d.flagsLinux() == PROT.EXEC);
+        try std.testing.expectEqual(PROT{ .EXEC = true }, d.posixFlags());
 
         const e: Protection = .{};
-        try std.testing.expect(e.flagsLinux() == PROT.NONE);
+        try std.testing.expectEqual(PROT{}, e.posixFlags());
     }
 };
 
 pub const MapError = switch (target) {
-    .windows => windows.VirtualAllocError,
+    .windows => error{ AccessDenied, OutOfMemory, Unexpected },
     else => std.posix.MMapError,
 };
 
 pub const ProtectError = switch (target) {
     .windows => error{ AccessDenied, Unexpected },
-    .linux => error{ AccessDenied, OutOfMemory, Unexpected } || procmap.ProcmapQuery.QueryError,
+    .linux => std.process.ProtectMemoryError || procmap.ProcmapQuery.QueryError,
     else => unreachable,
 };
 
 pub fn map(addr: ?*anyopaque, size: usize, prot: Protection) MapError![]align(std.heap.page_size_min) u8 {
     return switch (target) {
-        .windows => @alignCast(@as([*]u8, @ptrCast(try windows.VirtualAlloc(addr, size, windows.MEM_COMMIT | windows.MEM_RESERVE, prot.flags())))[0..size]),
-        else => std.posix.mmap(@ptrCast(@alignCast(addr)), size, prot.flags(), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0),
+        .windows => blk: {
+            var base = addr;
+            var length = size;
+            switch (windows.ntdll.NtAllocateVirtualMemory(windows.current_process, @ptrCast(&base), 0, &length, .{ .COMMIT = true, .RESERVE = true }, prot.winapiFlags())) {
+                .SUCCESS => break :blk @as([*]align(std.heap.page_size_min) u8, @ptrCast(@alignCast(base.?)))[0..size],
+                .ACCESS_DENIED => return error.AccessDenied,
+                .NO_MEMORY, .CONFLICTING_ADDRESSES, .COMMITMENT_LIMIT => return error.OutOfMemory,
+                else => |status| return windows.unexpectedStatus(status),
+            }
+        },
+        .linux => std.posix.mmap(@ptrCast(@alignCast(addr)), size, prot.posixFlags(), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0),
+        else => unreachable,
     };
 }
 
 pub fn unmap(mem: []align(std.heap.page_size_min) u8) void {
     return switch (target) {
-        .windows => windows.VirtualFree(mem.ptr, 0, windows.MEM_RELEASE),
+        .windows => {
+            var base: windows.PVOID = mem.ptr;
+            var size: usize = 0;
+            const status = windows.ntdll.NtFreeVirtualMemory(windows.current_process, &base, &size, .{ .RELEASE = true });
+            std.debug.assert(status == .SUCCESS);
+        },
         .linux => std.posix.munmap(mem),
         else => unreachable,
     };
@@ -112,11 +101,14 @@ pub fn unmap(mem: []align(std.heap.page_size_min) u8) void {
 pub fn protect(mem: []align(std.heap.page_size_min) u8, prot: Protection) ProtectError!Protection {
     switch (target) {
         .windows => {
-            var prev: windows.DWORD = undefined;
-            windows.VirtualProtect(mem.ptr, mem.len, prot.winapiFlags(), &prev) catch |err| switch (err) {
-                error.InvalidAddress => return error.AccessDenied,
-                error.Unexpected => return error.Unexpected,
-            };
+            var base: ?windows.PVOID = mem.ptr;
+            var size = mem.len;
+            var prev: windows.PAGE = undefined;
+            switch (windows.ntdll.NtProtectVirtualMemory(windows.current_process, &base, &size, prot.winapiFlags(), &prev)) {
+                .SUCCESS => {},
+                .INVALID_ADDRESS, .ACCESS_DENIED => return error.AccessDenied,
+                else => |status| return windows.unexpectedStatus(status),
+            }
 
             return .fromWinapi(prev);
         },
@@ -124,41 +116,45 @@ pub fn protect(mem: []align(std.heap.page_size_min) u8, prot: Protection) Protec
             var q: procmap.ProcmapQuery = .{ .query_addr = @intFromPtr(mem.ptr), .query_flags = .{} };
             try q.query();
 
-            try std.posix.mprotect(mem, prot.posixFlags());
+            try std.process.protectMemory(mem, .{ .read = prot.read, .write = prot.write, .execute = prot.execute });
             return q.vma_flags.prot();
         },
         else => unreachable,
     }
 }
 
-var mmap_min_addr: usize = undefined;
-var allocation_granularity: usize = undefined; // windows only
-var page_size: usize = undefined;
+var mmap_min_addr: std.atomic.Value(usize) = .init(std.math.maxInt(usize));
+var allocation_granularity: std.atomic.Value(usize) = .init(0);
 
-fn loadMemStats() void {
-    switch(target) {
+pub const InitError = switch (target) {
+    .windows => error{},
+    .linux => std.posix.OpenError || std.posix.ReadError || std.fmt.ParseIntError,
+    else => unreachable,
+};
+
+pub fn init() InitError!void {
+    if (mmap_min_addr.load(.acquire) != std.math.maxInt(usize)) return;
+
+    switch (target) {
         .windows => {
-            var system_info: std.os.windows.SYSTEM_INFO = undefined;
+            var system_info: kernel32.SYSTEM_INFO = undefined;
             kernel32.GetSystemInfo(&system_info);
-            mmap_min_addr = @intFromPtr(system_info.lpMinimumApplicationAddress);
-            allocation_granularity = system_info.dwAllocationGranularity;
+            allocation_granularity.store(system_info.dwAllocationGranularity, .monotonic);
+            mmap_min_addr.store(@intFromPtr(system_info.lpMinimumApplicationAddress), .release);
         },
         .linux => {
             const min_addr_path = "/proc/sys/vm/mmap_min_addr";
-            var buf: [32]u8 = @splat(0);
-            const fd = std.fs.openFileAbsolute(min_addr_path, .{}) catch @panic("cannot open " ++ min_addr_path);
-            defer fd.close();
+            var buf: [32]u8 = undefined;
+            const fd = try std.posix.openat(std.posix.AT.FDCWD, min_addr_path, .{ .CLOEXEC = true }, 0);
+            defer std.Io.Threaded.closeFd(fd);
 
-            const size = fd.read(&buf) catch @panic("cannot read " ++ min_addr_path);
-            mmap_min_addr = std.fmt.parseInt(usize, buf[0 .. size - 1], 10) catch @panic("could not parse " ++ min_addr_path);
-            // allocation_granularity = std.heap.pageSize();
-            page_size = std.heap.pageSize();
+            const size = try std.posix.read(fd, &buf);
+            const address = try std.fmt.parseInt(usize, std.mem.trim(u8, buf[0..size], "\r\n"), 10);
+            mmap_min_addr.store(address, .release);
         },
         else => unreachable,
     }
 }
-
-var mem_stats_once = std.once(loadMemStats);
 
 pub const Range = struct {
     /// inclusive
@@ -184,6 +180,7 @@ pub const Range = struct {
 
     /// Calculate max and min possible addresses for the trampoline relative to the target address
     pub fn rip(addr: usize) Range {
+        const min_addr = mmap_min_addr.load(.acquire);
         const to = b: {
             if (addr > std.math.maxInt(usize) - std.math.maxInt(i32)) break :b std.math.maxInt(usize);
             break :b addr + std.math.maxInt(i32);
@@ -191,14 +188,14 @@ pub const Range = struct {
 
         if (addr < std.math.maxInt(i32) + 1) {
             return .{
-                .from = mmap_min_addr,
+                .from = min_addr,
                 .to = to,
             };
         }
 
         const from: usize = addr - std.math.maxInt(u32) / 2;
         return .{
-            .from = if (from < mmap_min_addr) mmap_min_addr else from,
+            .from = if (from < min_addr) min_addr else from,
             .to = to,
         };
     }
@@ -220,7 +217,7 @@ pub const Range = struct {
 };
 
 pub const QueryError = switch (target) {
-    .windows => windows.VirtualQueryError,
+    .windows => error{Unexpected},
     .linux => procmap.ProcmapQuery.QueryError,
     else => unreachable,
 };
@@ -242,6 +239,7 @@ fn vmaGapSize(addr: usize) QueryError!usize {
 
 /// Returns the starting address of a page that starts within the range
 fn findUnmappedAreaWithinLinux(bounds: Range, gap_size: usize) QueryError!?usize {
+    const page_size = std.heap.pageSize();
     var q: procmap.ProcmapQuery = .{
         .query_addr = bounds.from,
         .query_flags = .{ .covering_or_next_vma = true },
@@ -268,22 +266,23 @@ fn findUnmappedAreaWithinLinux(bounds: Range, gap_size: usize) QueryError!?usize
 
 /// Returns an address contained within a page that starts within the provided range
 fn findUnmappedAreaWithinWindows(bounds: Range, gap_size: usize) QueryError!?usize {
-    var probe_address = std.mem.alignBackward(usize, bounds.from, allocation_granularity);
+    const granularity = allocation_granularity.load(.monotonic);
+    var probe_address = std.mem.alignBackward(usize, bounds.from, granularity);
     while (probe_address < bounds.to) {
-        var memory_info: std.os.windows.MEMORY_BASIC_INFORMATION = undefined;
-        const info_size = try std.os.windows.VirtualQuery(@ptrFromInt(probe_address), &memory_info, @sizeOf(@TypeOf(memory_info)));
+        var memory_info: kernel32.MEMORY_BASIC_INFORMATION = undefined;
+        const info_size = kernel32.VirtualQuery(@ptrFromInt(probe_address), &memory_info, @sizeOf(@TypeOf(memory_info)));
 
         if (info_size == 0) {
-            break;
+            return error.Unexpected;
         }
 
-        if (memory_info.State == std.os.windows.MEM_FREE and memory_info.RegionSize >= gap_size) {
+        if (memory_info.State == kernel32.MEM_FREE and memory_info.RegionSize >= gap_size) {
             return probe_address;
         }
 
         probe_address = @intFromPtr(memory_info.BaseAddress) + memory_info.RegionSize;
-        probe_address += allocation_granularity - 1;
-        probe_address = std.mem.alignBackward(usize, probe_address, allocation_granularity);
+        probe_address += granularity - 1;
+        probe_address = std.mem.alignBackward(usize, probe_address, granularity);
     }
 
     return null;
@@ -292,7 +291,6 @@ fn findUnmappedAreaWithinWindows(bounds: Range, gap_size: usize) QueryError!?usi
 /// bounds: min & max address where we're looking for an unallocated vma
 /// size: minimum size of the vma required
 pub fn findUnmappedAreaWithin(bounds: Range, size: usize) QueryError!?usize {
-    mem_stats_once.call();
     return switch (target) {
         .windows => findUnmappedAreaWithinWindows(bounds, size),
         .linux => findUnmappedAreaWithinLinux(bounds, size),

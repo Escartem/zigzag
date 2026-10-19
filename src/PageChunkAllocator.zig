@@ -20,8 +20,8 @@ pub const memory_block_size = 0x1000;
 
 first_block: ?*SharedExecutableBlock,
 
-pub fn init() SharedExecutableBlock.CacheMinAddressError!Allocator {
-    try SharedExecutableBlock.cacheMinAddressAndGranularity();
+pub fn init() mem.InitError!Allocator {
+    try mem.init();
     return .{
         .first_block = null,
     };
@@ -32,7 +32,7 @@ fn alloc(ctx: *anyopaque, origin: usize) Error!*Chunk {
     const self: *Allocator = @ptrCast(@alignCast(ctx));
     var next_block = self.first_block;
     while (next_block) |block| {
-        if(block.chunksRange().intersects(.rip(origin))) {
+        if (block.chunksRange().intersects(.rip(origin))) {
             return block.reserveChunk() catch continue;
         }
         next_block = block.head.next;

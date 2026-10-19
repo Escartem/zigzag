@@ -21,7 +21,7 @@ fn sqr_detour(n: u32) u64 {
 }
 
 pub fn main() !void {
-    var pca: zz.PageChunkAllocator = .{};
+    var pca = try zz.PageChunkAllocator.init();
     defer pca.deinit();
     const ca = pca.allocator();
 

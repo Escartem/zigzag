@@ -13,8 +13,7 @@ pub fn getPages(target: usize) []align(std.heap.page_size_min) u8 {
     return @alignCast(pageAlignedPtr[0..std.heap.page_size_min]); // TODO: check if patched instructions cross page boundaries
 }
 
-const TrampolineBuffer = std.io.FixedBufferStream([]u8);
-const TrampolineWriteError = error{InsufficientBufferSize} || Disassembler.Error || TrampolineBuffer.WriteError || error{CannotEncode};
+const TrampolineWriteError = Disassembler.Error || std.Io.Writer.Error || error{CannotEncode};
 
 /// returns amount of copied bytes
 fn writeTrampolineBody(dest: usize, source: usize) TrampolineWriteError!usize {
@@ -22,8 +21,7 @@ fn writeTrampolineBody(dest: usize, source: usize) TrampolineWriteError!usize {
     const dest_bytes: [*]u8 = @ptrFromInt(dest);
     const source_bytes: [*]u8 = @ptrFromInt(source);
 
-    var trampoline_buffer = std.io.fixedBufferStream(dest_bytes[0..trampoline_buffer_size]);
-    const trampoline_writer = trampoline_buffer.writer();
+    var trampoline_writer = std.Io.Writer.fixed(dest_bytes[0..trampoline_buffer_size]);
 
     var disassembler = Disassembler.init(source_bytes[0 .. min_size + max_instruction_size]);
 
@@ -39,7 +37,7 @@ fn writeTrampolineBody(dest: usize, source: usize) TrampolineWriteError!usize {
 
         const ins_buf = source_bytes[last_pos..disassembler.pos];
         const opcode = ins.encoding.data.opc[0];
-        const cpy_ins_addr = dest + trampoline_buffer.pos;
+        const cpy_ins_addr = dest + trampoline_writer.end;
         const ins_addr = @intFromPtr(ins_buf.ptr);
 
         // TODO: A relative instruction might be outside of the possible range.
@@ -58,7 +56,7 @@ fn writeTrampolineBody(dest: usize, source: usize) TrampolineWriteError!usize {
             var cpy_ins = ins;
             cpy_ins.ops[op_index].mem.m_rip.disp = @intCast(new_disp);
 
-            try cpy_ins.encode(trampoline_writer, .{});
+            try cpy_ins.encode(&trampoline_writer, .{});
         } else if (opcode == 0xE8 or opcode == 0xE9 or
             opcode & 0xF0 == 0x70 or opcode & 0xFC == 0xE0 or ins.encoding.data.opc[1] & 0xF0 == 0x80)
         {
@@ -73,7 +71,7 @@ fn writeTrampolineBody(dest: usize, source: usize) TrampolineWriteError!usize {
 
                 var cpy_ins = ins;
                 cpy_ins.ops[0].imm.signed = new_disp;
-                try cpy_ins.encode(trampoline_writer, .{});
+                try cpy_ins.encode(&trampoline_writer, .{});
             } else {
                 // copy an internal jump
                 try trampoline_writer.writeAll(ins_buf);
@@ -117,7 +115,7 @@ fn writeAbsoluteJump(address: [*]u8, destination: usize) void {
 
 pub const Error = error{
     UnavailableNearbyPage,
-} || ChunkAllocator.ReserveChunkError || Disassembler.Error || std.posix.MProtectError || TrampolineWriteError || ChunkAllocator.AllocBlockError;
+} || ChunkAllocator.ReserveChunkError || Disassembler.Error || mem.ProtectError || TrampolineWriteError || ChunkAllocator.AllocBlockError;
 
 /// Create a type for a hook of the provided signature
 pub fn Hook(comptime T: type) type {
