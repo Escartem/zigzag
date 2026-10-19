@@ -163,11 +163,11 @@ pub const Range = struct {
     to: usize,
 
     pub fn contains(r: Range, addr: usize) bool {
-        return r.from >= addr and r.to <= addr;
+        return addr >= r.from and addr <= r.to;
     }
 
     pub fn intersects(a: Range, b: Range) bool {
-        return a.from >= b.from or a.to <= b.to;
+        return a.from <= b.to and b.from <= a.to;
     }
 
     /// Construct the range [origin - x; origin + x]
@@ -267,7 +267,7 @@ fn findUnmappedAreaWithinLinux(bounds: Range, gap_size: usize) QueryError!?usize
 /// Returns an address contained within a page that starts within the provided range
 fn findUnmappedAreaWithinWindows(bounds: Range, gap_size: usize) QueryError!?usize {
     const granularity = allocation_granularity.load(.monotonic);
-    var probe_address = std.mem.alignBackward(usize, bounds.from, granularity);
+    var probe_address = std.mem.alignForward(usize, bounds.from, granularity);
     while (probe_address < bounds.to) {
         var memory_info: kernel32.MEMORY_BASIC_INFORMATION = undefined;
         const info_size = kernel32.VirtualQuery(@ptrFromInt(probe_address), &memory_info, @sizeOf(@TypeOf(memory_info)));
